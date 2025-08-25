@@ -1,0 +1,5 @@
+.prompts/
+settings.env
+*.exe
+*.exe.*
+*.exe~

@@ -1,0 +1,7 @@
+.*/
+settings.env
+*.log
+*.exe
+*.exe.*
+*.exe~
+
