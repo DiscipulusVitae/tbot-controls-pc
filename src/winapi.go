@@ -28,3 +28,23 @@ func SendMediaKey(keyCode uintptr) error {
 
 	return nil
 }
+
+// SendVolumeDownKey отправляет 5 нажатий клавиши Volume Down для заметного изменения громкости
+func SendVolumeDownKey() error {
+	for i := 0; i < 5; i++ {
+		if err := SendMediaKey(VK_VOLUME_DOWN); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SendVolumeUpKey отправляет 5 нажатий клавиши Volume Up для заметного изменения громкости
+func SendVolumeUpKey() error {
+	for i := 0; i < 5; i++ {
+		if err := SendMediaKey(VK_VOLUME_UP); err != nil {
+			return err
+		}
+	}
+	return nil
+}

@@ -61,8 +61,10 @@ func main() {
 	// Отправка клавиатуры при старте
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("⏯️", "play_pause"),
 			tgbotapi.NewInlineKeyboardButtonData("💤", "hibernate"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("⏯️", "play_pause"),
 			tgbotapi.NewInlineKeyboardButtonData("🔉", "volume_down"),
 			tgbotapi.NewInlineKeyboardButtonData("🔊", "volume_up"),
 		),
@@ -101,6 +103,18 @@ func main() {
 					log.Printf("Ошибка выполнения гибернации: %v", err)
 				} else {
 					log.Printf("Команда гибернации выполнена успешно")
+				}
+			case "volume_down":
+				if err := SendVolumeDownKey(); err != nil {
+					log.Printf("Ошибка отправки команды Volume Down: %v", err)
+				} else {
+					log.Printf("Команда Volume Down выполнена успешно (5 нажатий)")
+				}
+			case "volume_up":
+				if err := SendVolumeUpKey(); err != nil {
+					log.Printf("Ошибка отправки команды Volume Up: %v", err)
+				} else {
+					log.Printf("Команда Volume Up выполнена успешно (5 нажатий)")
 				}
 			}
 		}
