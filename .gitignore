@@ -1,2 +1,6 @@
 settings.env
+
+# Go
+*.exe
 *.log
+panel-state.json

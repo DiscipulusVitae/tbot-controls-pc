@@ -1,15 +1,23 @@
 package main
 
 import (
+	"encoding/json"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/joho/godotenv"
 )
+
+// PanelState хранит состояние панели управления
+type PanelState struct {
+	MessageID int   `json:"message_id"`
+	ChatID    int64 `json:"chat_id"`
+}
 
 func main() {
 	// Настройка логгирования
@@ -18,7 +26,7 @@ func main() {
 		log.Fatalf("Ошибка получения пути к исполняемому файлу: %v", err)
 	}
 	logPath := filepath.Join(filepath.Dir(exePath), "tbot-controls-pc.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
 	if err != nil {
 		log.Fatalf("Не удалось открыть файл лога: %v", err)
 	}
@@ -58,7 +66,7 @@ func main() {
 
 	updates := bot.GetUpdatesChan(u)
 
-	// Отправка клавиатуры при старте
+	// Создание клавиатуры
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("💤", "hibernate"),
@@ -69,10 +77,43 @@ func main() {
 			tgbotapi.NewInlineKeyboardButtonData("🔊", "volume_up"),
 		),
 	)
-	msg := tgbotapi.NewMessage(userID, "Панель управления ПК")
-	msg.ReplyMarkup = keyboard
-	if _, err := bot.Send(msg); err != nil {
-		log.Printf("Не удалось отправить клавиатуру: %v", err)
+
+	// Попытка загрузить состояние панели
+	panelState := loadPanelState(exePath)
+
+	if panelState.MessageID != 0 && panelState.ChatID == userID {
+		// Редактируем существующую панель
+		log.Println("Обнаружено сохраненное состояние. Попытка обновить панель управления...")
+		editMsg := tgbotapi.NewEditMessageReplyMarkup(userID, panelState.MessageID, keyboard)
+		if _, err := bot.Request(editMsg); err != nil {
+			// Проверяем, не является ли ошибка "message is not modified"
+			if strings.Contains(err.Error(), "message is not modified") {
+				log.Println("Панель уже актуальна, обновление не требуется.")
+			} else {
+				log.Printf("Не удалось отредактировать панель (возможно, она была удалена): %v", err)
+				// Если редактирование не удалось, отправляем новую
+				log.Println("Отправляем новую панель управления.")
+				msg := tgbotapi.NewMessage(userID, "Панель управления ПК")
+				msg.ReplyMarkup = keyboard
+				if sentMsg, err := bot.Send(msg); err != nil {
+					log.Printf("Не удалось отправить новую панель: %v", err)
+				} else {
+					savePanelState(exePath, sentMsg.MessageID, sentMsg.Chat.ID)
+				}
+			}
+		} else {
+			log.Println("Существующая панель успешно обновлена")
+		}
+	} else {
+		// Отправляем новую панель
+		log.Println("Отправляем новую панель управления")
+		msg := tgbotapi.NewMessage(userID, "Панель управления ПК")
+		msg.ReplyMarkup = keyboard
+		if sentMsg, err := bot.Send(msg); err != nil {
+			log.Printf("Не удалось отправить клавиатуру: %v", err)
+		} else {
+			savePanelState(exePath, sentMsg.MessageID, sentMsg.Chat.ID)
+		}
 	}
 
 	for update := range updates {
@@ -121,6 +162,54 @@ func main() {
 	}
 
 	log.Println("Бот завершает работу.")
+}
+
+// PanelState хранит состояние панели управления
+// type PanelState struct {
+// 	MessageID int   `json:"message_id"`
+// 	ChatID    int64 `json:"chat_id"`
+// }
+
+// loadPanelState загружает состояние панели из файла
+func loadPanelState(exePath string) PanelState {
+	statePath := filepath.Join(filepath.Dir(exePath), "panel-state.json")
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("Не удалось прочитать файл состояния '%s': %v", statePath, err)
+		}
+		return PanelState{}
+	}
+
+	var state PanelState
+	if err := json.Unmarshal(data, &state); err != nil {
+		log.Printf("Ошибка чтения JSON из файла состояния '%s': %v", statePath, err)
+		return PanelState{}
+	}
+
+	log.Printf("Состояние панели успешно загружено из '%s': MessageID=%d", statePath, state.MessageID)
+	return state
+}
+
+// savePanelState сохраняет состояние панели в файл
+func savePanelState(exePath string, messageID int, chatID int64) {
+	state := PanelState{
+		MessageID: messageID,
+		ChatID:    chatID,
+	}
+
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		log.Printf("Ошибка сериализации состояния панели: %v", err)
+		return
+	}
+
+	statePath := filepath.Join(filepath.Dir(exePath), "panel-state.json")
+	if err := os.WriteFile(statePath, data, 0666); err != nil {
+		log.Printf("Ошибка сохранения состояния панели в '%s': %v", statePath, err)
+	} else {
+		log.Printf("Состояние панели успешно сохранено в '%s'", statePath)
+	}
 }
 
 // HibernatePC выполняет команду гибернации ПК
