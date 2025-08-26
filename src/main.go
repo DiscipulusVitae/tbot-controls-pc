@@ -78,43 +78,47 @@ func main() {
 		),
 	)
 
+	// Определение пути к файлу изображения
+	imagePath := filepath.Join(filepath.Dir(exePath), "tbot-picture.jpg")
+
 	// Попытка загрузить состояние панели
 	panelState := loadPanelState(exePath)
 
 	if panelState.MessageID != 0 && panelState.ChatID == userID {
-		// Редактируем существующую панель
 		log.Println("Обнаружено сохраненное состояние. Попытка обновить панель управления...")
-		editMsg := tgbotapi.NewEditMessageReplyMarkup(userID, panelState.MessageID, keyboard)
-		if _, err := bot.Request(editMsg); err != nil {
-			// Проверяем, не является ли ошибка "message is not modified"
+		// Check if the image file exists to determine if we are dealing with a photo message or a text message.
+		_, imageErr := os.Stat(imagePath)
+		isImagePresent := imageErr == nil
+
+		var err error
+		if isImagePresent {
+			// Attempt to edit the reply markup of the existing photo message.
+			editMarkup := tgbotapi.NewEditMessageReplyMarkup(userID, panelState.MessageID, keyboard)
+			_, err = bot.Request(editMarkup)
+		} else {
+			// Attempt to edit the reply markup of the existing text message.
+			// The existing sendOrEditMessage function does this for messageID != 0 and will send a new one if editing fails.
+			sendOrEditMessage(bot, userID, panelState.MessageID, "Панель управления ПК", keyboard, exePath)
+			// No need to continue the outer if/else, as sendOrEditMessage handles the success/failure and new message sending.
+			goto EndOfPanelUpdate // Use goto to skip the rest of the block
+		}
+
+		if err != nil {
 			if strings.Contains(err.Error(), "message is not modified") {
 				log.Println("Панель уже актуальна, обновление не требуется.")
 			} else {
 				log.Printf("Не удалось отредактировать панель (возможно, она была удалена): %v", err)
-				// Если редактирование не удалось, отправляем новую
 				log.Println("Отправляем новую панель управления.")
-				msg := tgbotapi.NewMessage(userID, "Панель управления ПК")
-				msg.ReplyMarkup = keyboard
-				if sentMsg, err := bot.Send(msg); err != nil {
-					log.Printf("Не удалось отправить новую панель: %v", err)
-				} else {
-					savePanelState(exePath, sentMsg.MessageID, sentMsg.Chat.ID)
-				}
+				sendInitialMessage(bot, userID, keyboard, imagePath, exePath)
 			}
 		} else {
 			log.Println("Существующая панель успешно обновлена")
 		}
 	} else {
-		// Отправляем новую панель
 		log.Println("Отправляем новую панель управления")
-		msg := tgbotapi.NewMessage(userID, "Панель управления ПК")
-		msg.ReplyMarkup = keyboard
-		if sentMsg, err := bot.Send(msg); err != nil {
-			log.Printf("Не удалось отправить клавиатуру: %v", err)
-		} else {
-			savePanelState(exePath, sentMsg.MessageID, sentMsg.Chat.ID)
-		}
+		sendInitialMessage(bot, userID, keyboard, imagePath, exePath)
 	}
+EndOfPanelUpdate:
 
 	for update := range updates {
 		if update.CallbackQuery != nil {
@@ -209,6 +213,66 @@ func savePanelState(exePath string, messageID int, chatID int64) {
 		log.Printf("Ошибка сохранения состояния панели в '%s': %v", statePath, err)
 	} else {
 		log.Printf("Состояние панели успешно сохранено в '%s'", statePath)
+	}
+}
+
+// sendInitialMessage отправляет начальное сообщение (с фото или без) и клавиатуру
+func sendInitialMessage(bot *tgbotapi.BotAPI, userID int64, keyboard tgbotapi.InlineKeyboardMarkup, imagePath, exePath string) {
+	if _, err := os.Stat(imagePath); err == nil {
+		// Файл изображения существует, отправляем фото
+		photoMsg := tgbotapi.NewPhoto(userID, tgbotapi.FilePath(imagePath))
+		photoMsg.ReplyMarkup = keyboard
+		photoMsg.Caption = "Панель управления ПК" // Добавляем подпись к фото
+		if sentMsg, err := bot.Send(photoMsg); err != nil {
+			log.Printf("Не удалось отправить фото: %v", err)
+			// Если отправка фото не удалась, пробуем отправить текстовое сообщение
+			sendOrEditMessage(bot, userID, 0, "Панель управления ПК", keyboard, exePath)
+		} else {
+			log.Printf("Фото '%s' успешно отправлено", imagePath)
+			savePanelState(exePath, sentMsg.MessageID, sentMsg.Chat.ID)
+		}
+	} else if os.IsNotExist(err) {
+		log.Printf("Файл изображения '%s' не найден. Отправляем текстовое сообщение.", imagePath)
+		sendOrEditMessage(bot, userID, 0, "Панель управления ПК", keyboard, exePath)
+	} else {
+		log.Printf("Ошибка при проверке файла изображения '%s': %v. Отправляем текстовое сообщение.", imagePath, err)
+		sendOrEditMessage(bot, userID, 0, "Панель управления ПК", keyboard, exePath)
+	}
+}
+
+// sendOrEditMessage отправляет или редактирует текстовое сообщение с клавиатурой
+func sendOrEditMessage(bot *tgbotapi.BotAPI, userID int64, messageID int, text string, keyboard tgbotapi.InlineKeyboardMarkup, exePath string) {
+	if messageID != 0 {
+		editMsg := tgbotapi.NewEditMessageText(userID, messageID, text)
+		editMsg.ReplyMarkup = &keyboard
+		if _, err := bot.Request(editMsg); err != nil {
+			if strings.Contains(err.Error(), "message is not modified") {
+				log.Println("Текстовое сообщение уже актуально, обновление не требуется.")
+			} else {
+				log.Printf("Не удалось отредактировать текстовое сообщение: %v", err)
+				// Если редактирование не удалось, отправляем новое текстовое сообщение
+				log.Println("Отправляем новое текстовое сообщение с панелью.")
+				msg := tgbotapi.NewMessage(userID, text)
+				msg.ReplyMarkup = keyboard
+				if sentMsg, err := bot.Send(msg); err != nil {
+					log.Printf("Не удалось отправить текстовое сообщение: %v", err)
+				} else {
+					log.Printf("Новое текстовое сообщение с панелью успешно отправлено")
+					savePanelState(exePath, sentMsg.MessageID, sentMsg.Chat.ID)
+				}
+			}
+		} else {
+			log.Println("Существующее текстовое сообщение успешно обновлено")
+		}
+	} else {
+		msg := tgbotapi.NewMessage(userID, text)
+		msg.ReplyMarkup = keyboard
+		if sentMsg, err := bot.Send(msg); err != nil {
+			log.Printf("Не удалось отправить текстовое сообщение: %v", err)
+		} else {
+			log.Printf("Текстовое сообщение с панелью успешно отправлено")
+			savePanelState(exePath, sentMsg.MessageID, sentMsg.Chat.ID)
+		}
 	}
 }
 

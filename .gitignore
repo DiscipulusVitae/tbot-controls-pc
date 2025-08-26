@@ -1,6 +1,8 @@
+.prompts/
 settings.env
 
 # Go
 *.exe
 *.log
+*.jpg
 panel-state.json
