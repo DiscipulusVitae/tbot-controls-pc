@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"log"
 	"os"
 	"os/exec"
@@ -12,12 +11,6 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/joho/godotenv"
 )
-
-// PanelState хранит состояние панели управления
-type PanelState struct {
-	MessageID int   `json:"message_id"`
-	ChatID    int64 `json:"chat_id"`
-}
 
 func main() {
 	// Настройка логгирования
@@ -44,14 +37,25 @@ func main() {
 	if token == "" {
 		log.Fatal("TELEGRAM_BOT_TOKEN не найден в .env")
 	}
-	userIDStr := os.Getenv("TELEGRAM_USER_ID")
-	if userIDStr == "" {
-		log.Fatal("TELEGRAM_USER_ID не найден в .env")
+
+	authorizedUsersStr := os.Getenv("TELEGRAM_AUTHORIZED_USER_IDS")
+	if authorizedUsersStr == "" {
+		log.Fatal("TELEGRAM_AUTHORIZED_USER_IDS не найдены в .env")
 	}
-	userID, err := strconv.ParseInt(userIDStr, 10, 64)
-	if err != nil {
-		log.Fatalf("Ошибка преобразования TELEGRAM_USER_ID в число: %v", err)
+
+	authorizedUsersMap := make(map[int64]bool)
+	for _, s := range strings.Split(authorizedUsersStr, ",") {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		id, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			log.Fatalf("Ошибка преобразования ID пользователя '%s': %v", s, err)
+		}
+		authorizedUsersMap[id] = true
 	}
+	log.Printf("Авторизованные пользователи: %v", authorizedUsersMap)
 
 	bot, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
@@ -81,45 +85,7 @@ func main() {
 	// Определение пути к файлу изображения
 	imagePath := filepath.Join(filepath.Dir(exePath), "tbot-picture.jpg")
 
-	// Попытка загрузить состояние панели
-	panelState := loadPanelState(exePath)
-
-	if panelState.MessageID != 0 && panelState.ChatID == userID {
-		log.Println("Обнаружено сохраненное состояние. Попытка обновить панель управления...")
-		// Check if the image file exists to determine if we are dealing with a photo message or a text message.
-		_, imageErr := os.Stat(imagePath)
-		isImagePresent := imageErr == nil
-
-		var err error
-		if isImagePresent {
-			// Attempt to edit the reply markup of the existing photo message.
-			editMarkup := tgbotapi.NewEditMessageReplyMarkup(userID, panelState.MessageID, keyboard)
-			_, err = bot.Request(editMarkup)
-		} else {
-			// Attempt to edit the reply markup of the existing text message.
-			// The existing sendOrEditMessage function does this for messageID != 0 and will send a new one if editing fails.
-			sendOrEditMessage(bot, userID, panelState.MessageID, "Панель управления ПК", keyboard, exePath)
-			// No need to continue the outer if/else, as sendOrEditMessage handles the success/failure and new message sending.
-			goto EndOfPanelUpdate // Use goto to skip the rest of the block
-		}
-
-		if err != nil {
-			if strings.Contains(err.Error(), "message is not modified") {
-				log.Println("Панель уже актуальна, обновление не требуется.")
-			} else {
-				log.Printf("Не удалось отредактировать панель (возможно, она была удалена): %v", err)
-				log.Println("Отправляем новую панель управления.")
-				sendInitialMessage(bot, userID, keyboard, imagePath, exePath)
-			}
-		} else {
-			log.Println("Существующая панель успешно обновлена")
-		}
-	} else {
-		log.Println("Отправляем новую панель управления")
-		sendInitialMessage(bot, userID, keyboard, imagePath, exePath)
-	}
-EndOfPanelUpdate:
-
+	// Запуск цикла обработки обновлений Telegram
 	for update := range updates {
 		if update.CallbackQuery != nil {
 			callback := tgbotapi.NewCallback(update.CallbackQuery.ID, update.CallbackQuery.Data)
@@ -128,7 +94,7 @@ EndOfPanelUpdate:
 			}
 
 			// Проверяем, что callback от авторизованного пользователя
-			if update.CallbackQuery.From.ID != userID {
+			if !authorizedUsersMap[update.CallbackQuery.From.ID] {
 				log.Printf("Неавторизованный доступ от пользователя %d", update.CallbackQuery.From.ID)
 				continue
 			}
@@ -163,116 +129,58 @@ EndOfPanelUpdate:
 				}
 			}
 		}
+		// Обработка текстовых сообщений
+		if update.Message != nil {
+			// Проверяем, что сообщение от авторизованного пользователя
+			if !authorizedUsersMap[update.Message.From.ID] {
+				log.Printf("Неавторизованное сообщение от пользователя %d: %s", update.Message.From.ID, update.Message.Text)
+				continue
+			}
+
+			log.Printf("Получено сообщение от %s: %s", update.Message.From.UserName, update.Message.Text)
+
+			if update.Message.IsCommand() {
+				switch update.Message.Command() {
+				case "start":
+					sendPanelToUser(bot, update.Message.From.ID, keyboard, imagePath)
+				}
+			}
+		}
 	}
 
 	log.Println("Бот завершает работу.")
 }
 
-// PanelState хранит состояние панели управления
-// type PanelState struct {
-// 	MessageID int   `json:"message_id"`
-// 	ChatID    int64 `json:"chat_id"`
-// }
-
-// loadPanelState загружает состояние панели из файла
-func loadPanelState(exePath string) PanelState {
-	statePath := filepath.Join(filepath.Dir(exePath), "panel-state.json")
-	data, err := os.ReadFile(statePath)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			log.Printf("Не удалось прочитать файл состояния '%s': %v", statePath, err)
-		}
-		return PanelState{}
-	}
-
-	var state PanelState
-	if err := json.Unmarshal(data, &state); err != nil {
-		log.Printf("Ошибка чтения JSON из файла состояния '%s': %v", statePath, err)
-		return PanelState{}
-	}
-
-	log.Printf("Состояние панели успешно загружено из '%s': MessageID=%d", statePath, state.MessageID)
-	return state
-}
-
-// savePanelState сохраняет состояние панели в файл
-func savePanelState(exePath string, messageID int, chatID int64) {
-	state := PanelState{
-		MessageID: messageID,
-		ChatID:    chatID,
-	}
-
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		log.Printf("Ошибка сериализации состояния панели: %v", err)
-		return
-	}
-
-	statePath := filepath.Join(filepath.Dir(exePath), "panel-state.json")
-	if err := os.WriteFile(statePath, data, 0666); err != nil {
-		log.Printf("Ошибка сохранения состояния панели в '%s': %v", statePath, err)
-	} else {
-		log.Printf("Состояние панели успешно сохранено в '%s'", statePath)
-	}
-}
-
-// sendInitialMessage отправляет начальное сообщение (с фото или без) и клавиатуру
-func sendInitialMessage(bot *tgbotapi.BotAPI, userID int64, keyboard tgbotapi.InlineKeyboardMarkup, imagePath, exePath string) {
+// sendPanelToUser отправляет панель управления (с фото или без) указанному пользователю
+func sendPanelToUser(bot *tgbotapi.BotAPI, userID int64, keyboard tgbotapi.InlineKeyboardMarkup, imagePath string) {
 	if _, err := os.Stat(imagePath); err == nil {
 		// Файл изображения существует, отправляем фото
 		photoMsg := tgbotapi.NewPhoto(userID, tgbotapi.FilePath(imagePath))
 		photoMsg.ReplyMarkup = keyboard
 		photoMsg.Caption = "Панель управления ПК" // Добавляем подпись к фото
-		if sentMsg, err := bot.Send(photoMsg); err != nil {
-			log.Printf("Не удалось отправить фото: %v", err)
-			// Если отправка фото не удалась, пробуем отправить текстовое сообщение
-			sendOrEditMessage(bot, userID, 0, "Панель управления ПК", keyboard, exePath)
+		if _, err := bot.Send(photoMsg); err != nil {
+			log.Printf("Не удалось отправить фото пользователю %d: %v. Отправляем текстовое сообщение.", userID, err)
+			sendTextMessage(bot, userID, "Панель управления ПК", keyboard)
 		} else {
-			log.Printf("Фото '%s' успешно отправлено", imagePath)
-			savePanelState(exePath, sentMsg.MessageID, sentMsg.Chat.ID)
+			log.Printf("Фото '%s' успешно отправлено пользователю %d", imagePath, userID)
 		}
 	} else if os.IsNotExist(err) {
-		log.Printf("Файл изображения '%s' не найден. Отправляем текстовое сообщение.", imagePath)
-		sendOrEditMessage(bot, userID, 0, "Панель управления ПК", keyboard, exePath)
+		log.Printf("Файл изображения '%s' не найден. Отправляем текстовое сообщение пользователю %d.", imagePath, userID)
+		sendTextMessage(bot, userID, "Панель управления ПК", keyboard)
 	} else {
-		log.Printf("Ошибка при проверке файла изображения '%s': %v. Отправляем текстовое сообщение.", imagePath, err)
-		sendOrEditMessage(bot, userID, 0, "Панель управления ПК", keyboard, exePath)
+		log.Printf("Ошибка при проверке файла изображения '%s': %v. Отправляем текстовое сообщение пользователю %d.", imagePath, err)
+		sendTextMessage(bot, userID, "Панель управления ПК", keyboard)
 	}
 }
 
-// sendOrEditMessage отправляет или редактирует текстовое сообщение с клавиатурой
-func sendOrEditMessage(bot *tgbotapi.BotAPI, userID int64, messageID int, text string, keyboard tgbotapi.InlineKeyboardMarkup, exePath string) {
-	if messageID != 0 {
-		editMsg := tgbotapi.NewEditMessageText(userID, messageID, text)
-		editMsg.ReplyMarkup = &keyboard
-		if _, err := bot.Request(editMsg); err != nil {
-			if strings.Contains(err.Error(), "message is not modified") {
-				log.Println("Текстовое сообщение уже актуально, обновление не требуется.")
-			} else {
-				log.Printf("Не удалось отредактировать текстовое сообщение: %v", err)
-				// Если редактирование не удалось, отправляем новое текстовое сообщение
-				log.Println("Отправляем новое текстовое сообщение с панелью.")
-				msg := tgbotapi.NewMessage(userID, text)
-				msg.ReplyMarkup = keyboard
-				if sentMsg, err := bot.Send(msg); err != nil {
-					log.Printf("Не удалось отправить текстовое сообщение: %v", err)
-				} else {
-					log.Printf("Новое текстовое сообщение с панелью успешно отправлено")
-					savePanelState(exePath, sentMsg.MessageID, sentMsg.Chat.ID)
-				}
-			}
-		} else {
-			log.Println("Существующее текстовое сообщение успешно обновлено")
-		}
+// sendTextMessage отправляет текстовое сообщение с клавиатурой
+func sendTextMessage(bot *tgbotapi.BotAPI, userID int64, text string, keyboard tgbotapi.InlineKeyboardMarkup) {
+	msg := tgbotapi.NewMessage(userID, text)
+	msg.ReplyMarkup = keyboard
+	if _, err := bot.Send(msg); err != nil {
+		log.Printf("Не удалось отправить текстовое сообщение пользователю %d: %v", userID, err)
 	} else {
-		msg := tgbotapi.NewMessage(userID, text)
-		msg.ReplyMarkup = keyboard
-		if sentMsg, err := bot.Send(msg); err != nil {
-			log.Printf("Не удалось отправить текстовое сообщение: %v", err)
-		} else {
-			log.Printf("Текстовое сообщение с панелью успешно отправлено")
-			savePanelState(exePath, sentMsg.MessageID, sentMsg.Chat.ID)
-		}
+		log.Printf("Текстовое сообщение с панелью успешно отправлено пользователю %d", userID)
 	}
 }
 
