@@ -1,9 +1,10 @@
 .prompts/
 .cursor/
+**-/
 settings.env
 
 # Go
 *.exe
 *.log
 *.jpg
-panel-state.json
+

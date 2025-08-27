@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"syscall"
 )
 
@@ -15,18 +16,23 @@ var (
 // SendMediaKey эмулирует нажатие мультимедийной клавиши через Windows API
 func SendMediaKey(keyCode uintptr) error {
 	// Нажатие клавиши
-	_, _, err := keybdEvent.Call(keyCode, 0, 0, 0)
-	if err != nil && err.Error() != "The operation completed successfully." {
-		return err
+	ret, _, err := keybdEvent.Call(keyCode, 0, 0, 0)
+	if ret == 0 { // Функция keybd_event возвращает 0 при ошибке
+		return fmt.Errorf("ошибка эмуляции нажатия клавиши (код %d): %w", keyCode, err)
 	}
 
 	// Отпускание клавиши
-	_, _, err = keybdEvent.Call(keyCode, 0, 2, 0)
-	if err != nil && err.Error() != "The operation completed successfully." {
-		return err
+	ret, _, err = keybdEvent.Call(keyCode, 0, 2, 0)
+	if ret == 0 { // Функция keybd_event возвращает 0 при ошибке
+		return fmt.Errorf("ошибка эмуляции отпускания клавиши (код %d): %w", keyCode, err)
 	}
 
 	return nil
+}
+
+// SendPlayPauseKey отправляет команду Play/Pause для управления воспроизведением медиа
+func SendPlayPauseKey() error {
+	return SendMediaKey(VK_MEDIA_PLAY_PAUSE)
 }
 
 // SendVolumeDownKey отправляет 5 нажатий клавиши Volume Down для заметного изменения громкости

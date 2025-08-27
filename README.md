@@ -117,4 +117,4 @@ go build -ldflags "-H=windowsgui" -o tbot-controls-pc.exe ./src
 
 ---
 
-**Версия:** v1.0.0
+**Версия:** v1.1.1

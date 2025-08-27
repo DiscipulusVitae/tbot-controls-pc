@@ -1,18 +1,30 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/joho/godotenv"
 )
 
 func main() {
+	// Обработка паники для graceful завершения
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("ПАНИКА в main: %v", r)
+			log.Println("Бот завершает работу из-за непредвиденной ошибки")
+		}
+	}()
+
 	// Настройка логгирования
 	exePath, err := os.Executable()
 	if err != nil {
@@ -30,17 +42,24 @@ func main() {
 	// Загрузка .env файла
 	err = godotenv.Load("settings.env")
 	if err != nil {
-		log.Fatalf("Ошибка загрузки файла settings.env: %v", err)
+		log.Printf("ПРЕДУПРЕЖДЕНИЕ: Не удалось загрузить settings.env: %v", err)
+		log.Println("Будут использоваться переменные окружения системы")
 	}
 
 	token := os.Getenv("TELEGRAM_BOT_TOKEN")
 	if token == "" {
-		log.Fatal("TELEGRAM_BOT_TOKEN не найден в .env")
+		log.Println("ОШИБКА: TELEGRAM_BOT_TOKEN не найден")
+		log.Println("Убедитесь, что файл settings.env существует и содержит TELEGRAM_BOT_TOKEN")
+		log.Println("Бот завершает работу из-за отсутствия токена")
+		return
 	}
 
 	authorizedUsersStr := os.Getenv("TELEGRAM_AUTHORIZED_USER_IDS")
 	if authorizedUsersStr == "" {
-		log.Fatal("TELEGRAM_AUTHORIZED_USER_IDS не найдены в .env")
+		log.Println("ОШИБКА: TELEGRAM_AUTHORIZED_USER_IDS не найдены")
+		log.Println("Убедитесь, что файл settings.env содержит TELEGRAM_AUTHORIZED_USER_IDS")
+		log.Println("Бот завершает работу из-за отсутствия авторизованных пользователей")
+		return
 	}
 
 	authorizedUsersMap := make(map[int64]bool)
@@ -51,15 +70,28 @@ func main() {
 		}
 		id, err := strconv.ParseInt(s, 10, 64)
 		if err != nil {
-			log.Fatalf("Ошибка преобразования ID пользователя '%s': %v", s, err)
+			log.Printf("ПРЕДУПРЕЖДЕНИЕ: Пропускаем невалидный ID пользователя '%s': %v", s, err)
+			continue
 		}
 		authorizedUsersMap[id] = true
 	}
-	log.Printf("Авторизованные пользователи: %v", authorizedUsersMap)
+
+	// Валидация: проверяем, что есть хотя бы один авторизованный пользователь
+	if len(authorizedUsersMap) == 0 {
+		log.Println("ОШИБКА: Не найдено ни одного валидного ID пользователя в TELEGRAM_AUTHORIZED_USER_IDS")
+		log.Println("Проверьте формат: ID1,ID2,ID3 (только цифры, через запятую)")
+		log.Println("Бот завершает работу из-за отсутствия авторизованных пользователей")
+		return
+	}
+
+	log.Printf("Загружено %d авторизованных пользователей", len(authorizedUsersMap))
 
 	bot, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
-		log.Panic(err)
+		log.Printf("КРИТИЧЕСКАЯ ОШИБКА: Невозможно подключиться к Telegram API: %v", err)
+		log.Println("Проверяйте TELEGRAM_BOT_TOKEN в settings.env")
+		log.Println("Бот завершает работу из-за ошибки подключения")
+		return
 	}
 
 	bot.Debug = false
@@ -69,6 +101,10 @@ func main() {
 	u.Timeout = 60
 
 	updates := bot.GetUpdatesChan(u)
+
+	// Создание контекста с отменой для graceful shutdown
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	// Создание клавиатуры
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
@@ -85,69 +121,77 @@ func main() {
 	// Определение пути к файлу изображения
 	imagePath := filepath.Join(filepath.Dir(exePath), "tbot-picture.jpg")
 
-	// Запуск цикла обработки обновлений Telegram
-	for update := range updates {
-		if update.CallbackQuery != nil {
-			callback := tgbotapi.NewCallback(update.CallbackQuery.ID, update.CallbackQuery.Data)
-			if _, err := bot.Request(callback); err != nil {
-				log.Println(err)
+	// Запуск цикла обработки обновлений Telegram в отдельной горутине
+	go func() {
+		for update := range updates {
+			if update.CallbackQuery != nil {
+				callback := tgbotapi.NewCallback(update.CallbackQuery.ID, update.CallbackQuery.Data)
+				if _, err := bot.Request(callback); err != nil {
+					log.Println(err)
+				}
+
+				// Проверяем, что callback от авторизованного пользователя
+				if !authorizedUsersMap[update.CallbackQuery.From.ID] {
+					log.Printf("Неавторизованный доступ от пользователя %d", update.CallbackQuery.From.ID)
+					continue
+				}
+
+				log.Printf("Нажата кнопка: %s", update.CallbackQuery.Data)
+
+				// Обработка нажатий кнопок
+				switch update.CallbackQuery.Data {
+				case "play_pause":
+					if err := SendPlayPauseKey(); err != nil {
+						log.Printf("Ошибка отправки команды Play/Pause: %v", err)
+					} else {
+						log.Printf("Команда Play/Pause выполнена успешно")
+					}
+				case "hibernate":
+					if err := HibernatePC(); err != nil {
+						log.Printf("Ошибка выполнения гибернации: %v", err)
+					} else {
+						log.Printf("Команда гибернации выполнена успешно")
+					}
+				case "volume_down":
+					if err := SendVolumeDownKey(); err != nil {
+						log.Printf("Ошибка отправки команды Volume Down: %v", err)
+					} else {
+						log.Printf("Команда Volume Down выполнена успешно (5 нажатий)")
+					}
+				case "volume_up":
+					if err := SendVolumeUpKey(); err != nil {
+						log.Printf("Ошибка отправки команды Volume Up: %v", err)
+					} else {
+						log.Printf("Команда Volume Up выполнена успешно (5 нажатий)")
+					}
+				}
 			}
-
-			// Проверяем, что callback от авторизованного пользователя
-			if !authorizedUsersMap[update.CallbackQuery.From.ID] {
-				log.Printf("Неавторизованный доступ от пользователя %d", update.CallbackQuery.From.ID)
-				continue
-			}
-
-			log.Printf("Нажата кнопка: %s", update.CallbackQuery.Data)
-
-			// Обработка нажатий кнопок
-			switch update.CallbackQuery.Data {
-			case "play_pause":
-				if err := SendMediaKey(0xB3); err != nil {
-					log.Printf("Ошибка отправки команды Play/Pause: %v", err)
-				} else {
-					log.Printf("Команда Play/Pause выполнена успешно")
+			// Обработка текстовых сообщений
+			if update.Message != nil {
+				// Проверяем, что сообщение от авторизованного пользователя
+				if !authorizedUsersMap[update.Message.From.ID] {
+					log.Printf("Неавторизованное сообщение от пользователя %d: %s", update.Message.From.ID, update.Message.Text)
+					continue
 				}
-			case "hibernate":
-				if err := HibernatePC(); err != nil {
-					log.Printf("Ошибка выполнения гибернации: %v", err)
-				} else {
-					log.Printf("Команда гибернации выполнена успешно")
-				}
-			case "volume_down":
-				if err := SendVolumeDownKey(); err != nil {
-					log.Printf("Ошибка отправки команды Volume Down: %v", err)
-				} else {
-					log.Printf("Команда Volume Down выполнена успешно (5 нажатий)")
-				}
-			case "volume_up":
-				if err := SendVolumeUpKey(); err != nil {
-					log.Printf("Ошибка отправки команды Volume Up: %v", err)
-				} else {
-					log.Printf("Команда Volume Up выполнена успешно (5 нажатий)")
+
+				log.Printf("Получено сообщение от %s: %s", update.Message.From.UserName, update.Message.Text)
+
+				if update.Message.IsCommand() {
+					switch update.Message.Command() {
+					case "start":
+						sendPanelToUser(bot, update.Message.From.ID, keyboard, imagePath)
+					}
 				}
 			}
 		}
-		// Обработка текстовых сообщений
-		if update.Message != nil {
-			// Проверяем, что сообщение от авторизованного пользователя
-			if !authorizedUsersMap[update.Message.From.ID] {
-				log.Printf("Неавторизованное сообщение от пользователя %d: %s", update.Message.From.ID, update.Message.Text)
-				continue
-			}
+	}()
 
-			log.Printf("Получено сообщение от %s: %s", update.Message.From.UserName, update.Message.Text)
+	// Ожидание сигнала отмены
+	<-ctx.Done()
 
-			if update.Message.IsCommand() {
-				switch update.Message.Command() {
-				case "start":
-					sendPanelToUser(bot, update.Message.From.ID, keyboard, imagePath)
-				}
-			}
-		}
-	}
-
+	// Graceful shutdown
+	log.Println("Получен сигнал завершения, останавливаем бота...")
+	bot.StopReceivingUpdates()
 	log.Println("Бот завершает работу.")
 }
 
@@ -160,32 +204,46 @@ func sendPanelToUser(bot *tgbotapi.BotAPI, userID int64, keyboard tgbotapi.Inlin
 		photoMsg.Caption = "Панель управления ПК" // Добавляем подпись к фото
 		if _, err := bot.Send(photoMsg); err != nil {
 			log.Printf("Не удалось отправить фото пользователю %d: %v. Отправляем текстовое сообщение.", userID, err)
-			sendTextMessage(bot, userID, "Панель управления ПК", keyboard)
+			msg := tgbotapi.NewMessage(userID, "Панель управления ПК")
+			msg.ReplyMarkup = keyboard
+			if _, err := bot.Send(msg); err != nil {
+				log.Printf("Не удалось отправить текстовое сообщение пользователю %d: %v", userID, err)
+			} else {
+				log.Printf("Текстовое сообщение с панелью успешно отправлено пользователю %d", userID)
+			}
 		} else {
 			log.Printf("Фото '%s' успешно отправлено пользователю %d", imagePath, userID)
 		}
 	} else if os.IsNotExist(err) {
 		log.Printf("Файл изображения '%s' не найден. Отправляем текстовое сообщение пользователю %d.", imagePath, userID)
-		sendTextMessage(bot, userID, "Панель управления ПК", keyboard)
+		msg := tgbotapi.NewMessage(userID, "Панель управления ПК")
+		msg.ReplyMarkup = keyboard
+		if _, err := bot.Send(msg); err != nil {
+			log.Printf("Не удалось отправить текстовое сообщение пользователю %d: %v", userID, err)
+		} else {
+			log.Printf("Текстовое сообщение с панелью успешно отправлено пользователю %d", userID)
+		}
 	} else {
 		log.Printf("Ошибка при проверке файла изображения '%s': %v. Отправляем текстовое сообщение пользователю %d.", imagePath, err)
-		sendTextMessage(bot, userID, "Панель управления ПК", keyboard)
-	}
-}
-
-// sendTextMessage отправляет текстовое сообщение с клавиатурой
-func sendTextMessage(bot *tgbotapi.BotAPI, userID int64, text string, keyboard tgbotapi.InlineKeyboardMarkup) {
-	msg := tgbotapi.NewMessage(userID, text)
-	msg.ReplyMarkup = keyboard
-	if _, err := bot.Send(msg); err != nil {
-		log.Printf("Не удалось отправить текстовое сообщение пользователю %d: %v", userID, err)
-	} else {
-		log.Printf("Текстовое сообщение с панелью успешно отправлено пользователю %d", userID)
+		msg := tgbotapi.NewMessage(userID, "Панель управления ПК")
+		msg.ReplyMarkup = keyboard
+		if _, err := bot.Send(msg); err != nil {
+			log.Printf("Не удалось отправить текстовое сообщение пользователю %d: %v", userID, err)
+		} else {
+			log.Printf("Текстовое сообщение с панелью успешно отправлено пользователю %d", userID)
+		}
 	}
 }
 
 // HibernatePC выполняет команду гибернации ПК
 func HibernatePC() error {
 	cmd := exec.Command("rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0")
-	return cmd.Run()
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+
+	err := cmd.Run()
+	if err != nil {
+		return fmt.Errorf("ошибка выполнения команды гибернации: %w", err)
+	}
+
+	return nil
 }
