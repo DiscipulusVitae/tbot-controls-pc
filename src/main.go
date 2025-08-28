@@ -197,41 +197,32 @@ func main() {
 
 // sendPanelToUser отправляет панель управления (с фото или без) указанному пользователю
 func sendPanelToUser(bot *tgbotapi.BotAPI, userID int64, keyboard tgbotapi.InlineKeyboardMarkup, imagePath string) {
+	// Вспомогательная функция для отправки fallback текстового сообщения
+	sendFallbackText := func(logPrefix string) {
+		log.Printf(logPrefix, imagePath, userID)
+		msg := tgbotapi.NewMessage(userID, "Панель управления ПК")
+		msg.ReplyMarkup = keyboard
+		if _, err := bot.Send(msg); err != nil {
+			log.Printf("Не удалось отправить текстовое сообщение пользователю %d: %v", userID, err)
+		} else {
+			log.Printf("Текстовое сообщение с панелью успешно отправлено пользователю %d", userID)
+		}
+	}
+
 	if _, err := os.Stat(imagePath); err == nil {
 		// Файл изображения существует, отправляем фото
 		photoMsg := tgbotapi.NewPhoto(userID, tgbotapi.FilePath(imagePath))
 		photoMsg.ReplyMarkup = keyboard
 		photoMsg.Caption = "Панель управления ПК" // Добавляем подпись к фото
 		if _, err := bot.Send(photoMsg); err != nil {
-			log.Printf("Не удалось отправить фото пользователю %d: %v. Отправляем текстовое сообщение.", userID, err)
-			msg := tgbotapi.NewMessage(userID, "Панель управления ПК")
-			msg.ReplyMarkup = keyboard
-			if _, err := bot.Send(msg); err != nil {
-				log.Printf("Не удалось отправить текстовое сообщение пользователю %d: %v", userID, err)
-			} else {
-				log.Printf("Текстовое сообщение с панелью успешно отправлено пользователю %d", userID)
-			}
+			sendFallbackText("Не удалось отправить фото '%s' пользователю %d: " + err.Error() + ". Отправляем текстовое сообщение.")
 		} else {
 			log.Printf("Фото '%s' успешно отправлено пользователю %d", imagePath, userID)
 		}
 	} else if os.IsNotExist(err) {
-		log.Printf("Файл изображения '%s' не найден. Отправляем текстовое сообщение пользователю %d.", imagePath, userID)
-		msg := tgbotapi.NewMessage(userID, "Панель управления ПК")
-		msg.ReplyMarkup = keyboard
-		if _, err := bot.Send(msg); err != nil {
-			log.Printf("Не удалось отправить текстовое сообщение пользователю %d: %v", userID, err)
-		} else {
-			log.Printf("Текстовое сообщение с панелью успешно отправлено пользователю %d", userID)
-		}
+		sendFallbackText("Файл изображения '%s' не найден. Отправляем текстовое сообщение пользователю %d.")
 	} else {
-		log.Printf("Ошибка при проверке файла изображения '%s': %v. Отправляем текстовое сообщение пользователю %d.", imagePath, err)
-		msg := tgbotapi.NewMessage(userID, "Панель управления ПК")
-		msg.ReplyMarkup = keyboard
-		if _, err := bot.Send(msg); err != nil {
-			log.Printf("Не удалось отправить текстовое сообщение пользователю %d: %v", userID, err)
-		} else {
-			log.Printf("Текстовое сообщение с панелью успешно отправлено пользователю %d", userID)
-		}
+		sendFallbackText("Ошибка при проверке файла изображения '%s': " + err.Error() + ". Отправляем текстовое сообщение пользователю %d.")
 	}
 }
 
